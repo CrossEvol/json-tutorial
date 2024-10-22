@@ -1,8 +1,21 @@
 #include "leptjson.h"
 #include <assert.h>  /* assert() */
 #include <stdlib.h>  /* NULL, strtod() */
+#include <errno.h>
+#include <stdio.h>
+#include <math.h>
 
 #define EXPECT(c, ch)       do { assert(*c->json == (ch)); c->json++; } while(0)
+
+#define ISDIGIT(ch)         ((ch) >= '0' && (ch) <= '9')
+
+#define ISDIGIT1TO9(ch)     ((ch) >= '1' && (ch) <= '9')
+
+#define FALSE 0
+
+#define TRUE 1
+
+#define UNKNOWN 2
 
 typedef struct {
     const char* json;
@@ -15,37 +28,197 @@ static void lept_parse_whitespace(lept_context* c) {
     c->json = p;
 }
 
-static int lept_parse_true(lept_context* c, lept_value* v) {
-    EXPECT(c, 't');
-    if (c->json[0] != 'r' || c->json[1] != 'u' || c->json[2] != 'e')
-        return LEPT_PARSE_INVALID_VALUE;
-    c->json += 3;
-    v->type = LEPT_TRUE;
+static int lept_parse_literal(lept_context* c, lept_value* v, const char* literal, const int length,  lept_type type) {
+    EXPECT(c, literal[0]);
+    for (size_t i = 1; i < length; i++)
+    {
+        if (c->json[i-1] != literal[i]) return LEPT_PARSE_INVALID_VALUE;
+    }
+    c->json += length - 1;
+    v->type = type;
     return LEPT_PARSE_OK;
+}
+
+static int lept_parse_true(lept_context* c, lept_value* v) {
+    return lept_parse_literal(c, v, "true", 4, LEPT_TRUE);
 }
 
 static int lept_parse_false(lept_context* c, lept_value* v) {
-    EXPECT(c, 'f');
-    if (c->json[0] != 'a' || c->json[1] != 'l' || c->json[2] != 's' || c->json[3] != 'e')
-        return LEPT_PARSE_INVALID_VALUE;
-    c->json += 4;
-    v->type = LEPT_FALSE;
-    return LEPT_PARSE_OK;
+    return lept_parse_literal(c,v,"false",5,LEPT_FALSE);
 }
 
 static int lept_parse_null(lept_context* c, lept_value* v) {
-    EXPECT(c, 'n');
-    if (c->json[0] != 'u' || c->json[1] != 'l' || c->json[2] != 'l')
-        return LEPT_PARSE_INVALID_VALUE;
-    c->json += 3;
-    v->type = LEPT_NULL;
-    return LEPT_PARSE_OK;
+    return lept_parse_literal(c, v, "null", 4, LEPT_NULL);
+}
+
+enum {
+    NUMBER_BEGIN,
+    NUMBER_SYMBOL,
+    NUMBER_ZERO_OR_OTHER,
+    NUMBER_ZERO,
+    NUMBER_DIGIT,
+    NUMBER_DOT,
+    NUMBER_EXPONENT,
+    NUMBER_END,
+};
+
+int validateNumberText(lept_context* c)
+{
+    int hasDot = FALSE;
+    int hasExponent = FALSE;
+    const char* p = c->json;
+
+    int phase = NUMBER_BEGIN;
+    while (phase != NUMBER_END)
+    {
+        switch(phase)
+        {
+            case NUMBER_BEGIN:
+                phase = NUMBER_SYMBOL;
+                ;
+                break;
+            case NUMBER_SYMBOL:
+                if (*p == '-')
+                {
+                    ++p;
+                    phase = NUMBER_ZERO_OR_OTHER;
+                }
+                else if (ISDIGIT(*p))
+                {
+                    phase = NUMBER_ZERO_OR_OTHER;
+                }
+                else
+                {
+                    return FALSE;
+                }
+                ;
+                break;
+            case NUMBER_DIGIT:
+                for (p++; ISDIGIT(*p); p++);
+                if (*p == '.')
+                {
+                    if (hasDot)
+                    {
+                        return FALSE;
+                    }
+                    else
+                    {
+                        ++p;
+                        phase = NUMBER_DOT;
+                    }
+                }
+                else if (*p == 'e' || *p == 'E')
+                {
+                    if (hasExponent)
+                    {
+                        return FALSE;
+                    }
+                    else
+                    {
+                        ++p;
+                        phase = NUMBER_EXPONENT;
+                    }
+                }
+                else if (*p == '\0')
+                {
+                    phase = NUMBER_END;
+                }
+                else
+                {
+                    return FALSE;
+                }
+                break;
+            case NUMBER_ZERO_OR_OTHER:
+                if (*p == '0')
+                {
+                    ++p;
+                    if (*p == '.')
+                    {
+                        ++p;
+                        phase = NUMBER_DOT;
+                    }
+                    else if (*p == '\0')
+                    {
+                        phase = NUMBER_END;
+                    }
+                    else
+                    {
+                        return UNKNOWN;
+                    }
+                }
+                else if (ISDIGIT1TO9(*p))
+                {
+                    phase = NUMBER_DIGIT;
+                }
+                else
+                {
+                    return FALSE;
+                }
+                ;
+                break;
+            case NUMBER_DOT:
+                hasDot = TRUE;
+                if (ISDIGIT(*p))
+                {
+                    phase = NUMBER_DIGIT;
+                }
+                else
+                {
+                    return FALSE;
+                }
+                ;
+                break;
+            case NUMBER_EXPONENT:
+                hasExponent = TRUE;
+                if (*p == '+' || *p == '-')
+                {
+                    ++p;
+                    phase = NUMBER_DIGIT;
+                }
+                else if (ISDIGIT(*p))
+                {
+                    phase = NUMBER_DIGIT;
+                }
+                else
+                {
+                    return FALSE;
+                }
+                ;
+                break;
+            case NUMBER_END:
+                ;
+                break;
+            default: 
+                return FALSE;
+                ;
+                break;
+        };
+        
+    }
+    return TRUE;
 }
 
 static int lept_parse_number(lept_context* c, lept_value* v) {
     char* end;
+
     /* \TODO validate number */
+    int flag = validateNumberText(c);
+    if (flag == FALSE)
+    {
+        v->type = LEPT_NULL;
+        return LEPT_PARSE_INVALID_VALUE;
+    }
+    if (flag == UNKNOWN)
+    {
+        v->type = LEPT_NULL;
+        return LEPT_PARSE_ROOT_NOT_SINGULAR;
+    }
+
+    errno = 0;
     v->n = strtod(c->json, &end);
+    if (errno == ERANGE && (v->n == HUGE_VAL || v->n == -HUGE_VAL)) {
+        return LEPT_PARSE_NUMBER_TOO_BIG;
+    }
     if (c->json == end)
         return LEPT_PARSE_INVALID_VALUE;
     c->json = end;
